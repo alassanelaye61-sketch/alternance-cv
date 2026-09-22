@@ -4,6 +4,66 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 // Initialize the Gemini API client
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
+// Models to try in order of preference
+const MODELS = [
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash',
+];
+
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
+async function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function generateWithRetryAndFallback(prompt: string) {
+  for (const modelName of MODELS) {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        console.log(`Trying model ${modelName}, attempt ${attempt}/${MAX_RETRIES}...`);
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            responseMimeType: 'application/json',
+          }
+        });
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+
+        console.log(`Success with model ${modelName} on attempt ${attempt}`);
+        return text;
+      } catch (error: any) {
+        const is503 = error?.message?.includes('503') || error?.status === 503;
+        const is429 = error?.message?.includes('429') || error?.status === 429;
+        const isRetryable = is503 || is429;
+
+        if (isRetryable && attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.random() * 500;
+          console.warn(`Model ${modelName} returned ${is503 ? '503' : '429'}, retrying in ${Math.round(delay)}ms...`);
+          await sleep(delay);
+          continue;
+        }
+
+        if (isRetryable) {
+          console.warn(`Model ${modelName} exhausted retries, trying next model...`);
+          break; // try next model
+        }
+
+        // Non-retryable error — throw immediately
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(
+    'Le service d\'IA est temporairement surchargé. Tous les modèles sont indisponibles. Veuillez réessayer dans quelques minutes.'
+  );
+}
+
 export async function POST(req: NextRequest) {
   try {
     if (!process.env.GEMINI_API_KEY) {
@@ -15,13 +75,6 @@ export async function POST(req: NextRequest) {
     if (!cvText || !jobDescription) {
       return NextResponse.json({ error: 'CV and Job Description are required' }, { status: 400 });
     }
-
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-flash-latest',
-      generationConfig: {
-        responseMimeType: 'application/json',
-      }
-    });
 
     const prompt = `# Role: Expert en Recrutement, Design de CV & Adaptation d'Alternance
 
@@ -106,9 +159,7 @@ Génère la réponse strictement dans la structure JSON suivante :
 \`\`\`
 `;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    const text = await generateWithRetryAndFallback(prompt);
     
     // MimeType application/json already parses it as valid JSON string, but sometimes we need to strip markdown backticks
     let cleanText = text.trim();
@@ -124,6 +175,11 @@ Génère la réponse strictement dans la structure JSON suivante :
 
   } catch (error: any) {
     console.error('Error generating optimization:', error);
-    return NextResponse.json({ error: error.message || 'An error occurred during optimization' }, { status: 500 });
+    
+    const userMessage = error.message?.includes('surchargé')
+      ? error.message
+      : 'Une erreur est survenue lors de l\'optimisation. Veuillez réessayer.';
+    
+    return NextResponse.json({ error: userMessage }, { status: 503 });
   }
 }
