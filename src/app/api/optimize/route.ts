@@ -6,7 +6,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
 // Models to try in order of preference
 const MODELS = [
-  'gemini-2.5-flash',
+  'gemini-3.6-flash',
   'gemini-3.5-flash',
   'gemini-3.8-flash',
 ];
