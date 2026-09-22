@@ -4,64 +4,50 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 // Initialize the Gemini API client
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 
-// Models to try in order of preference
-const MODELS = [
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-3.8-flash',
-];
+// Primary model
+const MODEL_NAME = 'gemini-3.6-flash';
 
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000;
+const MAX_RETRIES = 1;
+const BASE_DELAY_MS = 500;
 
 async function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function generateWithRetryAndFallback(prompt: string) {
-  for (const modelName of MODELS) {
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        console.log(`Trying model ${modelName}, attempt ${attempt}/${MAX_RETRIES}...`);
-        const model = genAI.getGenerativeModel({
-          model: modelName,
-          generationConfig: {
-            responseMimeType: 'application/json',
-          }
-        });
-
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        const text = response.text();
-
-        console.log(`Success with model ${modelName} on attempt ${attempt}`);
-        return text;
-      } catch (error: any) {
-        const is503 = error?.message?.includes('503') || error?.status === 503;
-        const is429 = error?.message?.includes('429') || error?.status === 429;
-        const isRetryable = is503 || is429;
-
-        if (isRetryable && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.random() * 500;
-          console.warn(`Model ${modelName} returned ${is503 ? '503' : '429'}, retrying in ${Math.round(delay)}ms...`);
-          await sleep(delay);
-          continue;
+async function generateWithRetry(prompt: string) {
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    try {
+      console.log(`Trying model ${MODEL_NAME}, attempt ${attempt}...`);
+      const model = genAI.getGenerativeModel({
+        model: MODEL_NAME,
+        generationConfig: {
+          responseMimeType: 'application/json',
         }
+      });
 
-        if (isRetryable) {
-          console.warn(`Model ${modelName} exhausted retries, trying next model...`);
-          break; // try next model
-        }
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
 
-        // Non-retryable error — throw immediately
-        throw error;
+      console.log(`Success with model ${MODEL_NAME} on attempt ${attempt}`);
+      return text;
+    } catch (error: any) {
+      const is503 = error?.message?.includes('503') || error?.status === 503;
+      const is429 = error?.message?.includes('429') || error?.status === 429;
+      const isRetryable = is503 || is429;
+
+      if (isRetryable && attempt <= MAX_RETRIES) {
+        const delay = BASE_DELAY_MS + Math.random() * 500;
+        console.warn(`Model returned ${is503 ? '503' : '429'}, retrying in ${Math.round(delay)}ms...`);
+        await sleep(delay);
+        continue;
       }
+
+      throw error;
     }
   }
 
-  throw new Error(
-    'Le service d\'IA est temporairement surchargé. Tous les modèles sont indisponibles. Veuillez réessayer dans quelques minutes.'
-  );
+  throw new Error('Le service d\'IA est temporairement indisponible. Veuillez réessayer.');
 }
 
 export async function POST(req: NextRequest) {
@@ -159,7 +145,7 @@ Génère la réponse strictement dans la structure JSON suivante :
 \`\`\`
 `;
 
-    const text = await generateWithRetryAndFallback(prompt);
+    const text = await generateWithRetry(prompt);
     
     // MimeType application/json already parses it as valid JSON string, but sometimes we need to strip markdown backticks
     let cleanText = text.trim();
